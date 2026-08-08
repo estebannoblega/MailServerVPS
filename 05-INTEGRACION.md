@@ -2,31 +2,35 @@
 
 ## Objetivo
 
-Documentar la integración del servidor de correo de `enoblega.com.ar`
-con los servicios y componentes externos necesarios para su operación.
+Documentar la integración entre los componentes que forman el servidor
+de correo de `enoblega.com.ar`.
 
-El esquema implementado es:
+La configuración documentada en este archivo corresponde al entorno real
+utilizado durante la implementación, pero los valores específicos de
+infraestructura se presentan como variables o placeholders cuando no son
+necesarios para reproducir el procedimiento.
+
+------------------------------------------------------------------------
+
+## 1. Arquitectura de integración
+
+Flujo general:
 
 ``` text
                          INTERNET
                             │
              ┌──────────────┼──────────────┐
              │              │              │
-           DNS            Gmail          Clientes
+            DNS           Gmail          Clientes
              │              │          Outlook / móvil
              │              │              │
              ▼              ▼              ▼
       enoblega.com.ar   SMTP :25      IMAP :993
-             │          smtp.enoblega   imap.enoblega
+             │          smtp.<DOMAIN>  imap.<DOMAIN>
              │              │              │
              └──────────────┼──────────────┘
                             │
-                    66.97.38.104
-                            │
-                     ┌──────▼──────┐
-                     │    VPS      │
-                     │   Debian    │
-                     └──────┬──────┘
+                       MAIL SERVER
                             │
              ┌──────────────┼──────────────┐
              │              │              │
@@ -37,11 +41,23 @@ El esquema implementado es:
                          Maildir
 ```
 
+### Componentes
+
+  Componente   Función
+  ------------ -----------------------------------------------------
+  DNS          Resolución de MX, A, SPF, DKIM y DMARC
+  Postfix      SMTP, Submission y transporte de correo
+  Dovecot      IMAP, autenticación SASL y entrega LMTP
+  OpenDKIM     Firma DKIM
+  Certbot      Obtención y renovación de certificados TLS
+  Nginx        Publicación del webroot ACME
+  Gmail        Plataforma utilizada para validar envío y recepción
+
 ------------------------------------------------------------------------
 
-# 1. Integración DNS
+# 2. Integración DNS
 
-El dominio utilizado es:
+El dominio utilizado durante la implementación es:
 
 ``` text
 enoblega.com.ar
@@ -54,34 +70,44 @@ ns1.donweb.com
 ns2.donweb.com
 ```
 
-### Registros principales
+## Registros principales
+
+### A
 
 ``` text
-smtp.enoblega.com.ar.  A    66.97.38.104
-imap.enoblega.com.ar.  A    66.97.38.104
+smtp.<DOMAIN>  A  <MAIL_SERVER_IPV4>
+imap.<DOMAIN>  A  <MAIL_SERVER_IPV4>
 ```
 
-Registro MX:
+En el entorno implementado ambos hostnames apuntan a la IPv4 pública del
+VPS.
+
+### MX
 
 ``` text
-enoblega.com.ar.  MX  10 smtp.enoblega.com.ar.
+<DOMAIN>.  MX  10 smtp.<DOMAIN>.
 ```
 
-El MX determina que el servidor responsable de recibir correo para
-`enoblega.com.ar` es `smtp.enoblega.com.ar`.
+El registro MX determina el servidor responsable de recibir correo para
+el dominio.
+
+El MX debe apuntar a un hostname que disponga de un registro A/AAAA
+válido.
 
 ### SPF
 
+Ejemplo utilizado:
+
 ``` text
-enoblega.com.ar. TXT "v=spf1 ip4:66.97.38.104 -all"
+<DOMAIN>. TXT "v=spf1 ip4:<MAIL_SERVER_IPV4> -all"
 ```
 
-Esto autoriza únicamente a `66.97.38.104` a enviar correo en nombre del
-dominio.
+Este registro autoriza a la IPv4 del servidor a enviar correo en nombre
+del dominio.
 
 ### DKIM
 
-Selector:
+Selector utilizado:
 
 ``` text
 mail
@@ -90,7 +116,7 @@ mail
 Registro:
 
 ``` text
-mail._domainkey.enoblega.com.ar
+mail._domainkey.<DOMAIN>
 ```
 
 La clave pública publicada corresponde a la clave privada utilizada por
@@ -101,7 +127,7 @@ OpenDKIM.
 Registro:
 
 ``` text
-_dmarc.enoblega.com.ar
+_dmarc.<DOMAIN>
 ```
 
 Política inicial:
@@ -110,15 +136,15 @@ Política inicial:
 v=DMARC1; p=none
 ```
 
-Se dejó `p=none` como etapa inicial de monitoreo.
+Se utilizó `p=none` durante la etapa inicial de validación.
 
 ------------------------------------------------------------------------
 
-# 2. Integración Postfix ↔ Dovecot
+# 3. Integración Postfix ↔ Dovecot
 
 Postfix utiliza Dovecot para autenticar usuarios SMTP mediante SASL.
 
-En Postfix:
+Configuración relevante de Postfix:
 
 ``` text
 smtpd_sasl_auth_enable = yes
@@ -127,43 +153,41 @@ smtpd_sasl_path = private/auth
 smtpd_sasl_security_options = noanonymous
 ```
 
-Dovecot publica el socket de autenticación:
+Dovecot publica el socket de autenticación dentro del entorno de
+Postfix:
 
 ``` text
 /var/spool/postfix/private/auth
 ```
 
-El usuario:
+El flujo es:
 
 ``` text
-contacto@enoblega.com.ar
+Cliente
+   │
+   │ SMTP Submission :587
+   ▼
+Postfix
+   │
+   │ SASL
+   ▼
+Dovecot
+   │
+   └── autenticación
 ```
 
-fue probado exitosamente mediante SMTP Submission.
-
-Resultado observado:
+Durante las pruebas se obtuvo:
 
 ``` text
 235 2.7.0 Authentication successful
 ```
 
-Por lo tanto:
-
-``` text
-Cliente
-  ↓
-SMTP 587
-  ↓
-Postfix
-  ↓
-Dovecot SASL
-  ↓
-autenticación exitosa
-```
+Esto confirmó que la autenticación SMTP mediante Dovecot estaba
+funcionando correctamente.
 
 ------------------------------------------------------------------------
 
-# 3. Integración Postfix ↔ Dovecot LMTP
+# 4. Integración Postfix ↔ Dovecot LMTP
 
 La entrega de correo local utiliza LMTP.
 
@@ -173,34 +197,46 @@ Socket:
 /var/spool/postfix/private/dovecot-lmtp
 ```
 
-El flujo es:
+Flujo:
 
 ``` text
 Postfix
-   ↓
-LMTP
-   ↓
+   │
+   │ LMTP
+   ▼
 Dovecot
-   ↓
-/var/vmail/enoblega.com.ar/contacto/Maildir
+   │
+   ▼
+Maildir
 ```
 
-Durante las pruebas se obtuvo:
+La cuenta utilizada durante las pruebas fue:
 
 ``` text
-status=sent
+contacto@enoblega.com.ar
+```
+
+El Maildir se encuentra bajo:
+
+``` text
+/var/vmail/<DOMAIN>/contacto/Maildir
+```
+
+Durante las pruebas se obtuvo una respuesta LMTP equivalente a:
+
+``` text
 250 2.0.0 ... Saved
 ```
 
-Esto confirma que Dovecot acepta correctamente la entrega local.
+Esto confirmó que Dovecot aceptaba correctamente la entrega local.
 
 ------------------------------------------------------------------------
 
-# 4. Integración Postfix ↔ OpenDKIM
+# 5. Integración Postfix ↔ OpenDKIM
 
 Postfix utiliza OpenDKIM como Milter.
 
-Configuración:
+Configuración relevante:
 
 ``` text
 milter_default_action = accept
@@ -209,78 +245,99 @@ smtpd_milters = unix:/opendkim/opendkim.sock
 non_smtpd_milters = unix:/opendkim/opendkim.sock
 ```
 
-El socket real está ubicado dentro del entorno chroot de Postfix:
+El socket se encuentra dentro del entorno de Postfix:
 
 ``` text
 /var/spool/postfix/opendkim/opendkim.sock
 ```
 
-OpenDKIM utiliza:
+Esta ubicación es importante porque Postfix utiliza chroot para
+determinados servicios.
+
+## OpenDKIM
+
+Dominio:
 
 ``` text
-Domain:  enoblega.com.ar
-Selector: mail
+<DOMAIN>
+```
+
+Selector:
+
+``` text
+mail
 ```
 
 KeyTable:
 
 ``` text
-mail._domainkey.enoblega.com.ar enoblega.com.ar:mail:/etc/opendkim/keys/enoblega.com.ar/mail.private
+mail._domainkey.<DOMAIN> <DOMAIN>:mail:/etc/opendkim/keys/<DOMAIN>/mail.private
 ```
 
 SigningTable:
 
 ``` text
-*@enoblega.com.ar mail._domainkey.enoblega.com.ar
+*@<DOMAIN> mail._domainkey.<DOMAIN>
 ```
 
-La clave fue validada mediante:
+La clave privada debe permanecer fuera del repositorio y con permisos
+restrictivos.
+
+### Validación
+
+La clave se validó con:
 
 ``` bash
 opendkim-testkey \
-  -d enoblega.com.ar \
+  -d <DOMAIN> \
   -s mail \
-  -k /etc/opendkim/keys/enoblega.com.ar/mail.private \
+  -k /etc/opendkim/keys/<DOMAIN>/mail.private \
   -vvv
 ```
 
-Resultado:
+Resultado obtenido:
 
 ``` text
 key not secure
 key OK
 ```
 
-`key OK` confirma que la clave privada local coincide con la clave
+`key OK` confirmó que la clave privada local correspondía con la clave
 pública publicada.
 
-`key not secure` se debe a que la validación no está respaldada por
-DNSSEC y no indica un problema de DKIM.
+El mensaje:
+
+``` text
+key not secure
+```
+
+no indicó un problema con la clave DKIM; corresponde a la ausencia de
+validación DNSSEC en esa comprobación.
 
 ------------------------------------------------------------------------
 
-# 5. Integración TLS / Let's Encrypt
+# 6. Integración TLS / Let's Encrypt
 
-Los certificados son administrados mediante Certbot.
+Los certificados TLS son administrados mediante Certbot.
 
 ## SMTP
 
 Hostname:
 
 ``` text
-smtp.enoblega.com.ar
+smtp.<DOMAIN>
 ```
 
 Certificado:
 
 ``` text
-/etc/letsencrypt/live/smtp.enoblega.com.ar/fullchain.pem
+/etc/letsencrypt/live/smtp.<DOMAIN>/fullchain.pem
 ```
 
 Clave:
 
 ``` text
-/etc/letsencrypt/live/smtp.enoblega.com.ar/privkey.pem
+/etc/letsencrypt/live/smtp.<DOMAIN>/privkey.pem
 ```
 
 ## IMAP
@@ -288,123 +345,136 @@ Clave:
 Hostname:
 
 ``` text
-imap.enoblega.com.ar
+imap.<DOMAIN>
 ```
 
 Certificado:
 
 ``` text
-/etc/letsencrypt/live/imap.enoblega.com.ar/fullchain.pem
+/etc/letsencrypt/live/imap.<DOMAIN>/fullchain.pem
 ```
 
 Clave:
 
 ``` text
-/etc/letsencrypt/live/imap.enoblega.com.ar/privkey.pem
+/etc/letsencrypt/live/imap.<DOMAIN>/privkey.pem
 ```
+
+## Validación SMTP
+
+Se validó mediante:
+
+``` bash
+swaks \
+  --server smtp.<DOMAIN> \
+  --port 587 \
+  --tls \
+  --quit-after EHLO
+```
+
+La prueba confirmó:
+
+-   TLS 1.3.
+-   Certificado correspondiente al hostname.
+-   Validación de CA correcta.
+-   Validación del hostname correcta.
+-   STARTTLS operativo.
 
 ## Renovación
 
-Certbot informó que configuró la renovación automática.
-
-Debe comprobarse periódicamente:
+Comprobar periódicamente:
 
 ``` bash
 certbot renew --dry-run
 ```
 
-Después de una renovación real se debe verificar que Postfix y Dovecot
+Después de una renovación real debe verificarse que Postfix y Dovecot
 hayan recargado los nuevos certificados.
 
 ------------------------------------------------------------------------
 
-# 6. Integración con Nginx / Docker para ACME
+# 7. Integración Nginx / Docker / ACME
 
-Nginx funciona en el contenedor:
+Nginx funciona como reverse proxy dentro de Docker.
 
-``` text
-reverse-proxy
-```
-
-El webroot utilizado por Certbot es:
+El webroot utilizado para los desafíos ACME es:
 
 ``` text
 /root/PROXY/certbot
 ```
 
-El challenge ACME se publica mediante:
+El endpoint publicado es:
 
 ``` text
 /.well-known/acme-challenge/
 ```
 
-La validación se probó creando:
+## Validación del webroot
+
+Se creó temporalmente un archivo:
 
 ``` text
 /root/PROXY/certbot/.well-known/acme-challenge/test-smtp.txt
 ```
 
-y comprobando:
+y se verificó externamente mediante:
 
 ``` bash
-curl http://smtp.enoblega.com.ar/.well-known/acme-challenge/test-smtp.txt
+curl http://smtp.<DOMAIN>/.well-known/acme-challenge/test-smtp.txt
 ```
 
-Resultado:
+El contenido esperado fue:
 
 ``` text
 certbot-test-smtp
 ```
 
-Esto confirma que Let's Encrypt puede utilizar el webroot para validar
-los hostnames.
+Esto confirmó que el webroot utilizado por Certbot era accesible desde
+Internet.
 
 ------------------------------------------------------------------------
 
-# 7. Integración con Gmail
+# 8. Integración con Gmail
 
-Gmail fue utilizado como destino de las pruebas de envío.
+Gmail fue utilizado como plataforma externa para validar el envío.
 
 La prueba exitosa utilizó:
 
 ``` text
 From: contacto@enoblega.com.ar
-To: noblegaesteban@gmail.com
+To: <TEST_GMAIL_ADDRESS>
 ```
 
 El envío se realizó mediante:
 
 ``` text
-smtp.enoblega.com.ar:587
+smtp.<DOMAIN>:587
 STARTTLS
 SASL PLAIN
 ```
 
-La autenticación fue exitosa:
+La autenticación devolvió:
 
 ``` text
 235 2.7.0 Authentication successful
 ```
 
-Postfix entregó el mensaje a Gmail con:
+Postfix entregó posteriormente el mensaje a Gmail con:
 
 ``` text
 dsn=2.0.0
 status=sent
 ```
 
-Gmail reportó autenticación positiva para SPF y DKIM.
+Gmail verificó correctamente SPF y DKIM.
 
-## Error inicial
+## Error encontrado durante una prueba inicial
 
-Una prueba anterior utilizó como remitente:
+Una prueba anterior utilizó como remitente una identidad asociada al
+hostname del VPS en lugar del dominio de correo.
 
-``` text
-root@vps-5798471-x.dattaweb.com
-```
-
-Gmail rechazó ese mensaje porque la identidad del remitente no estaba
-autenticada por SPF/DKIM para `enoblega.com.ar`.
+Gmail rechazó ese mensaje porque la identidad utilizada no estaba
+autenticada para el dominio de envío.
 
 La prueba posterior utilizando:
 
@@ -414,46 +484,48 @@ contacto@enoblega.com.ar
 
 funcionó correctamente.
 
+### Recomendación
+
+Las pruebas de autenticación deben utilizar siempre una dirección del
+dominio que está siendo firmado y autorizado por SPF/DKIM.
+
 ------------------------------------------------------------------------
 
-# 8. Integración para recepción
+# 9. Integración para recepción
 
 El flujo esperado es:
 
 ``` text
-noblegaesteban@gmail.com
-          │
-          ▼
-       Gmail
-          │
-       DNS MX
-          │
-          ▼
-smtp.enoblega.com.ar
-          │
-       TCP/25
-          │
-          ▼
-       Postfix
-          │
-        LMTP
-          │
-          ▼
-       Dovecot
-          │
-          ▼
-/var/vmail/enoblega.com.ar/contacto/Maildir
+Remitente externo
+       │
+       ▼
+      DNS
+       │
+       │ MX
+       ▼
+smtp.<DOMAIN>
+       │
+       │ TCP/25
+       ▼
+    Postfix
+       │
+       │ LMTP
+       ▼
+    Dovecot
+       │
+       ▼
+    Maildir
 ```
 
-Postfix fue probado localmente mediante:
+La aceptación del destinatario se probó localmente con:
 
 ``` bash
 swaks \
-  --server smtp.enoblega.com.ar \
+  --server smtp.<DOMAIN> \
   --port 25 \
   --quit-after RCPT \
-  --from noblegaesteban@gmail.com \
-  --to contacto@enoblega.com.ar
+  --from <EXTERNAL_TEST_ADDRESS> \
+  --to contacto@<DOMAIN>
 ```
 
 Postfix respondió:
@@ -463,91 +535,60 @@ Postfix respondió:
 250 2.1.5 Ok
 ```
 
-Esto confirma que el servidor acepta el dominio y el destinatario.
+Esto confirmó que el servidor acepta el dominio y el destinatario.
 
-La prueba utilizó `--quit-after RCPT`, por lo que no se entregó un
-mensaje real y Postfix posteriormente canceló la transacción. Esto es
+Como se utilizó:
+
+``` text
+--quit-after RCPT
+```
+
+la prueba terminó antes de enviar el contenido del mensaje. Por lo
+tanto, que Postfix cancele la transacción posteriormente es
 comportamiento esperado.
 
 ------------------------------------------------------------------------
 
-# 9. Estado de la integración externa
+# 10. Incidencia de propagación / caché DNS
 
-Al momento de documentar esta etapa:
+Durante la validación de recepción se observó una diferencia temporal
+entre resolvers públicos.
 
-  Integración                Estado
-  -------------------------- ---------------------------
-  DNS autoritativo           OK
-  A `smtp.enoblega.com.ar`   OK
-  A `imap.enoblega.com.ar`   OK
-  MX                         Publicado
-  SPF                        OK
-  DKIM                       OK
-  DMARC                      Publicado
-  Postfix SMTP 25            OK
-  Postfix Submission 587     OK
-  SASL Dovecot               OK
-  Dovecot LMTP               OK
-  IMAPS 993                  OK
-  TLS SMTP                   OK
-  TLS IMAP                   OK
-  Gmail → servidor           Pendiente de prueba final
-  Cliente IMAP externo       Pendiente
-
-------------------------------------------------------------------------
-
-# 10. Incidencia de propagación DNS
-
-Durante la validación se observó una diferencia entre resolvers
-públicos.
-
-Los DNS autoritativos de DonWeb devolvían:
+Los DNS autoritativos de DonWeb devolvían correctamente:
 
 ``` text
-10 smtp.enoblega.com.ar.
+10 smtp.<DOMAIN>.
 ```
 
-Cloudflare Public DNS (`1.1.1.1`) también llegó a devolver correctamente
-el MX.
+Cloudflare Public DNS (`1.1.1.1`) también llegó a devolver el MX
+correctamente.
 
-Google Public DNS (`8.8.8.8`), sin embargo, mantuvo temporalmente una
-respuesta negativa para el MX.
+Google Public DNS (`8.8.8.8`) mantuvo temporalmente una respuesta
+negativa para el MX.
 
-Esto explica que el correo enviado desde Gmail no generara ninguna
-conexión entrante visible en Postfix durante la prueba.
+Esto explicaba por qué Gmail no generaba conexiones entrantes visibles
+en Postfix durante la prueba de recepción.
 
-El servidor no debe modificarse por este motivo mientras los DNS
-autoritativos continúen devolviendo correctamente el MX.
+El servidor no requería modificaciones mientras los servidores
+autoritativos continuaran devolviendo correctamente el MX.
 
-Verificación:
+## Verificación
 
 ``` bash
-dig @ns1.donweb.com MX enoblega.com.ar +short
-dig @ns2.donweb.com MX enoblega.com.ar +short
+dig @ns1.donweb.com MX <DOMAIN> +short
+dig @ns2.donweb.com MX <DOMAIN> +short
 
-dig @8.8.8.8 MX enoblega.com.ar +short
-dig @1.1.1.1 MX enoblega.com.ar +short
+dig @8.8.8.8 MX <DOMAIN> +short
+dig @1.1.1.1 MX <DOMAIN> +short
 ```
 
-El objetivo es que todos terminen devolviendo:
+El estado esperado es:
 
 ``` text
-10 smtp.enoblega.com.ar.
+10 smtp.<DOMAIN>.
 ```
 
-Una vez que los resolvers converjan, repetir:
-
-``` text
-noblegaesteban@gmail.com
-        ↓
-contacto@enoblega.com.ar
-```
-
-y observar:
-
-``` bash
-journalctl -u postfix -f
-```
+en todos los resolvers consultados.
 
 ------------------------------------------------------------------------
 
@@ -556,59 +597,152 @@ journalctl -u postfix -f
 ## Entrada --- IMAP
 
 ``` text
-Servidor: imap.enoblega.com.ar
+Servidor: imap.<DOMAIN>
 Puerto: 993
 Seguridad: SSL/TLS
-Usuario: contacto@enoblega.com.ar
+Usuario: contacto@<DOMAIN>
 ```
 
 ## Salida --- SMTP
 
 ``` text
-Servidor: smtp.enoblega.com.ar
+Servidor: smtp.<DOMAIN>
 Puerto: 587
 Seguridad: STARTTLS
 Autenticación: contraseña
-Usuario: contacto@enoblega.com.ar
+Usuario: contacto@<DOMAIN>
 ```
 
-No utilizar puerto 25 como puerto de envío desde clientes finales.
+El puerto 25 no debe utilizarse como puerto de envío desde clientes
+finales.
 
 El puerto 25 queda destinado principalmente al transporte SMTP entre
 servidores.
 
 ------------------------------------------------------------------------
 
-# 12. Próximas validaciones
+# 12. Estado de integración
 
-Una vez propagado el MX:
+  Integración              Estado
+  ------------------------ -------------------------------
+  DNS autoritativo         OK
+  Registro A SMTP          OK
+  Registro A IMAP          OK
+  MX                       Publicado
+  SPF                      OK
+  DKIM                     OK
+  DMARC                    Publicado
+  Postfix SMTP 25          OK
+  Postfix Submission 587   OK
+  SASL Dovecot             OK
+  Dovecot LMTP             OK
+  IMAPS 993                OK
+  TLS SMTP                 OK
+  TLS IMAP                 OK
+  Envío hacia Gmail        Validado
+  Recepción externa        Pendiente de validación final
+  Cliente IMAP externo     Pendiente
 
-1.  Enviar desde `noblegaesteban@gmail.com` a
-    `contacto@enoblega.com.ar`.
-2.  Ejecutar en el VPS:
+------------------------------------------------------------------------
+
+# 13. Validación final
+
+Una vez que el MX sea visible de forma consistente en los resolvers
+públicos:
+
+### 1. Verificar MX
+
+``` bash
+dig @8.8.8.8 MX <DOMAIN> +short
+dig @1.1.1.1 MX <DOMAIN> +short
+```
+
+### 2. Monitorear Postfix
 
 ``` bash
 journalctl -u postfix -f
 ```
 
-3.  Confirmar conexión entrante desde infraestructura de Google.
-4.  Confirmar entrega LMTP a Dovecot.
-5.  Confirmar archivo nuevo en:
+### 3. Enviar desde una cuenta externa
 
 ``` text
-/var/vmail/enoblega.com.ar/contacto/Maildir/new/
+<EXTERNAL_TEST_ADDRESS>
+        ↓
+contacto@<DOMAIN>
 ```
 
-6.  Configurar un cliente IMAP.
-7.  Verificar recepción desde IMAP.
-8.  Responder desde `contacto@enoblega.com.ar`.
-9.  Verificar nuevamente SPF/DKIM/DMARC en Gmail.
-10. Ejecutar:
+### 4. Verificar Maildir
+
+``` bash
+find /var/vmail/<DOMAIN>/contacto/Maildir/new -type f -ls
+```
+
+### 5. Probar IMAP
+
+Conectar mediante:
+
+``` text
+imap.<DOMAIN>:993
+```
+
+### 6. Responder desde el servidor
+
+Enviar desde:
+
+``` text
+contacto@<DOMAIN>
+```
+
+hacia una cuenta externa.
+
+### 7. Verificar autenticación
+
+En Gmail u otro proveedor compatible:
+
+``` text
+SPF: PASS
+DKIM: PASS
+DMARC: PASS
+```
+
+### 8. Verificar renovación
 
 ``` bash
 certbot renew --dry-run
 ```
 
-11. Configurar backups y monitoreo.
-12. Cambiar la contraseña utilizada durante las pruebas antes de
-    considerar la cuenta lista para producción.
+------------------------------------------------------------------------
+
+# 14. Seguridad y mantenimiento
+
+## Credenciales
+
+Las contraseñas utilizadas durante pruebas no deben almacenarse en este
+repositorio.
+
+Si una contraseña real fue expuesta durante una prueba, debe cambiarse
+antes de considerar la cuenta operativa.
+
+## Clave DKIM
+
+No publicar:
+
+``` text
+/etc/opendkim/keys/<DOMAIN>/mail.private
+```
+
+## Backups
+
+Definir un esquema de backup para:
+
+``` text
+/etc/postfix/
+/etc/dovecot/
+/etc/opendkim/
+/etc/letsencrypt/
+/var/vmail/
+```
+
+Las claves privadas y los Maildir deben almacenarse en un backup
+protegido.
+
